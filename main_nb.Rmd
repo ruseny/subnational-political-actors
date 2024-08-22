@@ -1,0 +1,276 @@
+---
+title: "Replication script for manuscript 'Subnational political actors and socialization in European institutions'"
+author: "For peer review"
+date: "01/12/2023"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+This document is prepared to present the analyses in the paper "Subnational political actors and socialization in European institutions: An analysis of views on multilevel governance " and to facilitate replication.
+
+The necessary packages are loaded as follows:
+
+```{r}
+library(tidyverse) #for general data pipelines
+library(simputation) #for imputation of missing data
+library(skimr) #for descriptives
+library(bestNormalize) #for normalizing numeric variables
+library(lmtest) #for robust standard errors
+library(sandwich) #for robust standard errors
+```
+
+We load the data from the csv file and subset for relevant observations and variables:
+
+```{r}
+df <- read_csv("data/subnationalViews_dataset.csv", 
+               col_select = c(surveyId, lang, country, sneType, 
+                              mlgS1, mlgS2, mlgS3, mlgS4, mlgS5, mlgC1, mlgC2, 
+                              euCompSocpol, euCompEc, euCompInAf, euCompForAf, 
+                              euCompOv, snaCompSocpol, snaCompEc, snaCompInAf, 
+                              snaCompForAf, snaCompOv, snaCompC1, snaCompC2, 
+                              effectiveIntOrg, effectiveDirRel, effectiveNatDel, 
+                              euFundImp.bin, represent, represent.bin, repDur,
+                              norepMotiv, age, gender, eduLev, polLeftRight, 
+                              polIdLoc, polIdNat, polIdEu, polIdCul, polIdIdeo)) %>% 
+  filter(country %in% c("Belgium", "France", "Germany", "Ireland", "Italy", 
+                        "Netherlands", "Norway", "Spain", "Sweden", "Switzerland", 
+                        "United Kingdom"))
+```
+
+We use KNN imputation to deal with missing data:
+
+```{r}
+set.seed(2023)
+df_imp <- df %>% 
+  impute_knn( . -surveyId -lang -country -countryPop -sneType -represent 
+              -represent.bin -norepMotiv -repDur ~ 
+                . -surveyId -lang -country -countryPop -sneType -represent 
+              -represent.bin -norepMotiv -repDur |
+                country + sneType)
+```
+
+One case cannot be completed for variables age and political orientation; we drop it
+
+```{r}
+df_imp <- df_imp %>% filter(!is.na(age) & !is.na(polLeftRight))
+```
+
+The number of observations per country is unbalanced; for this reason we calculate weights to treat each country evenly, which will be used in further analyses. However, later stages of analyses use different subsets of data; for this reason, we define a function for the calculation of weights:
+
+```{r}
+weight_calc <- function(df) {
+  wt_tbl <- df %>% 
+    group_by(country) %>% 
+    summarise(freq_ctr = n()) %>% 
+    ungroup() %>% 
+    mutate(perc_ctr = freq_ctr / sum(freq_ctr), 
+           weight = mean(perc_ctr) / perc_ctr)
+  df <- df %>% 
+    left_join(wt_tbl, by = "country", suffix = c("_old", "")) %>% 
+    select(-freq_ctr, -perc_ctr)
+  return(df)
+}
+
+df_imp <- weight_calc(df_imp)
+```
+
+We correct variable types and category levels as necessary:
+
+```{r}
+df_imp <- df_imp %>% 
+  mutate(surveyId = as.character(surveyId), 
+         across(c(lang, country, sneType, effectiveIntOrg:euFundImp.bin, represent.bin,   
+                  gender, polIdLoc:polIdIdeo), as.factor), 
+         across(c(mlgS1:snaCompC2, age), as.numeric),
+         represent = factor(represent, levels=c("NONE", "COR", "CLRAE", "OTHER")), 
+         norepMotiv = factor(norepMotiv, levels=as.character(1:5), ordered=TRUE), 
+         eduLev = factor(eduLev, levels=as.character(1:3), ordered=TRUE), 
+         polLeftRight = factor(polLeftRight, levels=as.character(1:9), ordered=TRUE))
+```
+
+Principal component analysis (PCA) to reduce answers to fewer composite index variables:
+
+```{r}
+pca_mlg <- prcomp(df_imp[5:11], scale.=TRUE)
+pca_eu <- prcomp(df_imp[12:16], scale.=TRUE)
+pca_sna <- prcomp(df_imp[17:23], scale.=TRUE)
+
+#summary(pca_mlg) ; print(pca_mlg) 
+#summary(pca_eu) ; print(pca_eu)
+#summary(pca_sna) ; print(pca_sna)
+```
+
+We calculate the index variables with weights from PCA:
+
+```{r}
+df_imp <- df_imp %>% 
+  rowwise() %>% 
+  mutate(mlgInd = weighted.mean(c(mlgS1, mlgS2, mlgS3, mlgS4, mlgS5, mlgC1, mlgC2), 
+                                pca_mlg$rotation[,1]), 
+         euInd = weighted.mean(c(euCompSocpol, euCompEc, euCompInAf, euCompForAf, euCompOv), 
+                               pca_eu$rotation[,1]), 
+         snaInd = weighted.mean(c(snaCompSocpol, snaCompEc, snaCompInAf, snaCompForAf, 
+                                  snaCompOv, snaCompC1, snaCompC2), 
+                                pca_sna$rotation[,1])) %>% 
+  ungroup()
+```
+
+We simplify political ideology into three groups:
+
+```{r}
+df_imp <- df_imp %>% 
+  mutate(LRC = case_when(
+           as.numeric(polLeftRight) <=3 ~ "Left", 
+           as.numeric(polLeftRight) >3 & as.numeric(polLeftRight) <=6 ~ "Centre", 
+           as.numeric(polLeftRight) >6 ~ "Right"
+         ) %>% factor(levels = c("Centre", "Left", "Right")))
+```
+
+Descriptive statistics:
+
+```{r}
+skim(df_imp)
+
+df_imp %>% summarise(across(where(is.factor), ~ sum(.x == 1)/n()))
+df_imp %>% summarise(left = sum(LRC=="Left")/n(), 
+                     right = sum(LRC=="Right")/n(), 
+                     centre = sum(LRC=="Centre")/(n()), 
+                     female = sum(gender=="Female")/n(), 
+                     male = sum(gender=="Male")/n(), 
+                     edu1 = sum(eduLev==1)/n(),
+                     edu2 = sum(eduLev==2)/n(), 
+                     edu3 = sum(eduLev==3)/n(), 
+                     sneLocal = sum(sneType=="Local")/n(), 
+                     sneRegAd = sum(sneType=="RegionAd")/n(), 
+                     sneRegLeg = sum(sneType=="RegionLeg")/n())
+summary(as.numeric(df_imp$norepMotiv)) ; sd(as.numeric(df_imp$norepMotiv), na.rm=TRUE)
+```
+
+We normalise the index variables with standardised values for regression analyses:
+
+```{r}
+df_imp <- df_imp %>% 
+  mutate(mlgInd.norm = orderNorm(mlgInd)[[1]], 
+         euInd.norm = orderNorm(euInd)[[1]], 
+         snaInd.norm = orderNorm(snaInd)[[1]])
+```
+
+Fitting the base model: the first output is with normal standard errors, the second with robust:
+
+```{r}
+mainFormula <- as.formula("mlgInd.norm ~ country + represent.bin + 
+                           euInd.norm + snaInd.norm + effectiveIntOrg + 
+                           effectiveDirRel + euFundImp.bin + polIdEu + 
+                           polIdCul + polIdIdeo + LRC + age + gender + eduLev")
+
+model_base <- lm(mainFormula, data = df_imp, weights = weight)
+
+summary(model_base)
+coeftest(model_base, vcov=vcovHC(model_base, type="HC2", cluster = ~country))
+```
+
+Diagnostics: heteroskedasticity, outliers, multicolinearity
+
+```{r}
+bptest(model_base)
+car::outlierTest(model_base)
+car::vif(model_base)
+```
+
+We increase the robustness of the model by dropping outliers that cause heteroskedasticity. Dropping the third outlier does not reduce heteroskedasticity, keeping it does not lead to Type I error (case contradicting posited relationship); it is kept in the sample. Dropping other three outliers reduce heteroskedasticity without leading to Type I error (cases confirming posited relationship); they are dropped.
+
+The heteroskedasticity in the robust model is not statistically significant and not visually obvious. The output indeed shows that the coefficient estimate of the main predictor is lower than the base model.
+
+```{r}
+outlier_names <- names(car::outlierTest(model_base)[[1]])
+df_imp %>% filter(row.names(df_imp) %in% outlier_names)
+
+df_imp2 <- df_imp %>% filter(!(row.names(df_imp) %in% outlier_names[c(1,2,4)]))
+df_imp2 <- weight_calc(df_imp2)
+
+model_rob <- lm(mainFormula, weights = weight, data=df_imp2)
+
+bptest(model_rob)
+plot(model_rob$residuals^2 ~ df_imp2$mlgInd.norm)
+
+summary(model_rob)
+coeftest(model_rob, vcov=vcovHC(model_rob, type="HC2", cluster = ~country))
+```
+
+We repeat the same model with institution types:
+
+```{r}
+model_rob_type <- lm(update(mainFormula, . ~ . -represent.bin + represent), 
+                     weights = weight, data=df_imp2)
+summary(model_rob_type)
+coeftest(model_rob_type, vcov=vcovHC(model_rob_type, type="HC2", cluster = ~country))
+```
+
+We check if the difference between CoR an CLRA significant?:
+
+```{r}
+df_imp2 <- df_imp2 %>% mutate(represent2 = relevel(represent, "CLRAE"))
+model_rob_type2 <- lm(update(mainFormula, . ~ . -represent.bin + represent2), 
+                     weights = weight, data=df_imp2)
+summary(model_rob_type2)
+coeftest(model_rob_type2, vcov=vcovHC(model_rob_type2, type="HC2", cluster = ~country))
+```
+
+In order to compare with different motivation levels, we create categories of roughly equal size, including three levels of motivation and actual experience.
+
+```{r}
+df_imp3 <- df_imp2 %>% 
+  mutate(motiv_rep_com = case_when(
+    represent.bin == 1 ~ "Experience", 
+    norepMotiv < 4 ~ "Low-mid motivation", 
+    norepMotiv == 4 ~ "High motivation", 
+    norepMotiv == 5 ~ "Very high motivation"
+  ) %>% factor(levels = c(
+    "Low-mid motivation", "High motivation", "Very high motivation", "Experience"
+  ))) %>% 
+  drop_na(motiv_rep_com)
+df_imp3 <- weight_calc(df_imp3)
+```
+
+We visualise distribution of unexplained variance across motivation levels and experience. For unexplained variation, we get residuals from the final model without the main predictor. 
+
+```{r}
+model_wo_iv <- lm(update(mainFormula, . ~ . -represent.bin), 
+                  weights=weight, data=df_imp3)
+tbl_resids <- tibble(mlg = model_wo_iv$residuals, mot_rep = df_imp3$motiv_rep_com)
+
+tbl_resids %>% 
+  group_by(mot_rep) %>% 
+  summarise(mean = mean(mlg))
+
+figure <- tbl_resids %>% 
+ggplot(aes(mot_rep, mlg)) + 
+  geom_boxplot() + 
+  theme_minimal() + 
+  labs(x = "Motivation for experience or actual experience in European institutions", 
+       y = "Views on MLG (residual variation)")
+figure
+
+ggsave(filename = "plots/figure1_boxplot_exp.jpeg", plot = figure, device = "jpeg", 
+       width = 16, height = 12, units = "cm", dpi = 600)
+```
+
+We test the significance of the difference between very high motivation and experience
+
+```{r}
+df_imp_himo <- df_imp2 %>% 
+  filter(represent.bin == 1 | norepMotiv > 4)
+df_imp_himo <- weight_calc(df_imp_himo)
+
+model_comp <- lm(mainFormula, weights = weight, data = df_imp_himo)
+summary(model_comp)
+coeftest(model_comp, vcov=vcovHC(model_comp, type="HC2", cluster = ~country))
+```
+
+

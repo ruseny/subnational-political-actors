@@ -1,6 +1,6 @@
 # Subnational political actors and socialisation in European institutions
 
-The purpose of this project is to document the data processing, statistics, and regression models used in the research paper. 
+The purpose of this project is to document the data processing, statistics, and regression models used in the related research paper. One version of the paper is [here](https://drive.google.com/file/d/16NuelQBKjt2I9tL2VMwSkEtvXUmaU6sZ/view). 
 
 The language is R, and the main notebook is structured as an R markdown file.
 
